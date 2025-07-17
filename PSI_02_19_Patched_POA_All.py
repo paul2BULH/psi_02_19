@@ -67,9 +67,7 @@ class PSICalculator:
 
         # Populate self.all_specific_pu_codes with actual ICD-10 codes for specific pressure ulcers
         # This is corrected to get the actual codes from the appendix.
-        self.all_specific_pu_codes: Set[str] = set()
-        for code_set_name in self.all_specific_pu_codes_keys_from_map:
-            self.all_specific_pu_codes.update(self.code_sets.get(code_set_name, set()))
+        self.all_specific_pu_codes.update(self.code_sets.get(code_set_name, set()) for code_set_name in self.all_specific_pu_codes_keys_from_map)
 
 
         # PI~EXD* codes for principal/POA=Y secondary exclusion (union of PI and DTI exclusions)
@@ -648,9 +646,9 @@ class PSICalculator:
             # For these, age >= 18 is generally expected, but obstetric patients can be any age.
             # Check for specific age criteria in PSI definition, otherwise apply general age < 18.
 
-            # For PSI_05 and PSI_07, obstetric hospitalizations for patients of any age are allowed
+            # For PSI_04, PSI_05 and PSI_07, obstetric hospitalizations for patients of any age are allowed
             is_obstetric_any_age_allowed = False
-            if psi_code in ['PSI_05', 'PSI_07']:
+            if psi_code in ['PSI_04', 'PSI_05', 'PSI_07']: # ADDED 'PSI_04' HERE
                 # Obstetric: MDC == 14 and principal dx in MDC14PRINDX
                 mdc = row.get('MDC')
                 pdx = row.get('Pdx')
