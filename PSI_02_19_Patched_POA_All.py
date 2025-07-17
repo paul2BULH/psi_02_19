@@ -131,8 +131,9 @@ class PSICalculator:
                     'secondary_dx_not_poa': ['FTR4DX']
                 },
                 'exclusions': {
-                    # ADDED 'SEPSISPDX' to principal_dx exclusions for STRATUM_SEPSIS
-                    'principal_dx': ['FTR4DX', 'INFECID', 'SEPSISPDX']
+                    # Removed 'SEPSISPDX' as it's not a key in the provided PSI_Code_Sets.json
+                    # 'INFECID' is confirmed to contain 'A0104' and is a valid exclusion.
+                    'principal_dx': ['FTR4DX', 'INFECID']
                 }
             },
             'STRATUM_PNEUMONIA': {
