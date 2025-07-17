@@ -127,15 +127,108 @@ def display_dashboard(df):
     col3.metric("Exclusions", exclusions)
     col4.metric("Errors", errors)
 
-def get_gemini_explanation(prompt: str) -> str:
-    """Fetches an explanation from the Gemini API."""
+def get_gemini_explanation(prompt: str, row: pd.Series, psi_code: str, calculator: PSICalculator) -> str:
+    """
+    Fetches an explanation from the Gemini API, incorporating content-aware details
+    from PSI definitions and code sets.
+    """
     chat_history = []
-    chat_history.append({"role": "user", "parts": [{"text": prompt}]})
+    
+    # Build content-aware context for the prompt
+    context_lines = []
+    context_lines.append(f"\n--- Context for {psi_code} Analysis ---")
+    
+    psi_def = calculator.psi_definitions.get(psi_code, {})
+    population_type = psi_def.get('indicator', {}).get('population_type', 'N/A')
+    context_lines.append(f"PSI Type: {psi_def.get('indicator', {}).get('name', 'N/A')}")
+    context_lines.append(f"Population Type: {population_type}")
+
+    # Add relevant diagnoses and procedures from the patient's row that match known code sets
+    all_diagnoses = calculator._get_all_diagnoses(row)
+    all_procedures = calculator._get_all_procedures(row)
+
+    relevant_code_info = []
+
+    # Iterate through PSI definition to find relevant code sets
+    # This part can be made more sophisticated to parse all rules, but for simplicity,
+    # we'll look for common patterns or hardcode for known PSIs if structure is complex.
+    
+    # Example for PSI_04 (as it was the last point of discussion)
+    if psi_code == 'PSI_04':
+        context_lines.append("\nPSI_04 Specific Rules (simplified):")
+        context_lines.append("- Denominator requires surgical DRG (SURGI2R), OR procedure (ORPROC), and specific age/obstetric criteria.")
+        context_lines.append("- Must have one of 5 serious complications (Shock, Sepsis, Pneumonia, GI Hemorrhage, DVT/PE) based on specific secondary diagnoses/procedures.")
+        context_lines.append("- Exclusions apply for principal diagnoses matching complication codes, transfers, hospice, newborn MDC15.")
+
+        # Check for relevant codes in patient data against PSI_04 rules
+        relevant_psi04_code_sets = set()
+        for stratum_name, rules in calculator.psi04_rules.items():
+            for rule_type, rule_values in rules.get('inclusion', {}).items():
+                if rule_type == 'secondary_dx':
+                    relevant_psi04_code_sets.update(rule_values)
+                elif rule_type == 'procedure_after_or':
+                    relevant_psi04_code_sets.add(rule_values['code_set'])
+            for rule_type, rule_values in rules.get('exclusions', {}).items():
+                if rule_type in ['principal_dx', 'any_dx', 'any_proc']:
+                    relevant_psi04_code_sets.update(rule_values)
+                elif rule_type == 'secondary_dx_combined':
+                    relevant_psi04_code_sets.add(rule_values['dx_code_set_1'])
+                    relevant_psi04_code_sets.add(rule_values['principal_dx_code_set_2'])
+        
+        # Add general PSI_04 relevant sets
+        relevant_psi04_code_sets.add('SURGI2R')
+        relevant_psi04_code_sets.add('ORPROC')
+        relevant_psi04_code_sets.add('MDC14PRINDX')
+        relevant_psi04_code_sets.add('MDC15PRINDX')
+        relevant_psi04_code_sets.add('DISP') # For discharge disposition
+        relevant_psi04_code_sets.add('POINTOFORIGINUB04') # For admission source
+
+        for dx_entry in all_diagnoses:
+            dx_code = dx_entry['code']
+            poa_status = dx_entry['poa']
+            for cs_name in relevant_psi04_code_sets:
+                if dx_code in calculator.code_sets.get(cs_name, set()):
+                    relevant_code_info.append(f"- Diagnosis '{dx_code}' (POA: {poa_status}) is in code set '{cs_name}' (e.g., {list(calculator.code_sets.get(cs_name, set()))[:3]}...)")
+                    break # Found a match, move to next dx_entry
+
+        for proc_entry in all_procedures:
+            proc_code = proc_entry['code']
+            for cs_name in relevant_psi04_code_sets:
+                if proc_code in calculator.code_sets.get(cs_name, set()):
+                    relevant_code_info.append(f"- Procedure '{proc_code}' is in code set '{cs_name}' (e.g., {list(calculator.code_sets.get(cs_name, set()))[:3]}...)")
+                    break # Found a match, move to next proc_entry
+    
+    # Add a generic fallback for other PSIs if specific logic isn't implemented yet
+    else:
+        context_lines.append("\nGeneral Code Set Matches:")
+        # For other PSIs, iterate through all patient diagnoses/procedures
+        # and see if they match any known code sets.
+        for dx_entry in all_diagnoses:
+            dx_code = dx_entry['code']
+            poa_status = dx_entry['poa']
+            for cs_name, codes in calculator.code_sets.items():
+                if dx_code in codes:
+                    relevant_code_info.append(f"- Diagnosis '{dx_code}' (POA: {poa_status}) is in code set '{cs_name}' (e.g., {list(codes)[:3]}...)")
+                    break
+        for proc_entry in all_procedures:
+            proc_code = proc_entry['code']
+            for cs_name, codes in calculator.code_sets.items():
+                if proc_code in codes:
+                    relevant_code_info.append(f"- Procedure '{proc_code}' is in code set '{cs_name}' (e.g., {list(codes)[:3]}...)")
+                    break
+
+    if relevant_code_info:
+        context_lines.append("Relevant patient data found in the following code sets:")
+        context_lines.extend(relevant_code_info)
+    else:
+        context_lines.append("No specific code set matches found for this patient data in the context of this PSI.")
+
+
+    full_prompt = f"{prompt}\n\n{' '.join(context_lines)}\n\nBased on the provided PSI definition, the patient's data, and the relevant code sets, provide a detailed and clear explanation for why this encounter received the '{row['Status']}' status for {psi_code}. Focus on how specific data points (diagnoses, procedures, age, DRG, POA status, etc.) interact with the PSI's rules and the provided code sets."
+
+    chat_history.append({"role": "user", "parts": [{"text": full_prompt}]})
     payload = {"contents": chat_history}
 
-    # Retrieve API key from Streamlit secrets
-    # Ensure you have a [secrets] section in .streamlit/secrets.toml
-    # with gemini_api_key = "YOUR_API_KEY_HERE"
     try:
         apiKey = st.secrets["gemini_api_key"]
     except KeyError:
@@ -187,21 +280,18 @@ def display_results_table(results_df, debug_mode=False):
                 # Use a unique key for each button
                 if st.button(f"✨ Explain with Gemini (Encounter: {row['EncounterID']}, PSI: {row['PSI']})", key=f"gemini_explain_{i}_{row['EncounterID']}_{row['PSI']}"):
                     with st.spinner("Generating explanation with Gemini..."):
-                        prompt = f"Explain the PSI result for EncounterID: {row['EncounterID']}, PSI: {row['PSI']}. Status: {row['Status']}. Rationale: {row['Rationale']}. Here is the full debug report:\n\n{report}"
+                        # Pass row and calculator to get_gemini_explanation
+                        prompt_base = f"Explain the PSI result for EncounterID: {row['EncounterID']}, PSI: {row['PSI']}. Status: {row['Status']}. Rationale: {row['Rationale']}. Here is the full debug report:\n\n{report}"
+                        explanation_text = get_gemini_explanation(prompt_base, row, row['PSI'], calculator)
                         
                         # Store explanation in session state to avoid re-generating on rerun
                         explanation_key = f"gemini_explanation_{key}"
+                        st.session_state[explanation_key] = explanation_text # Store the generated text
                         
-                        # Only call API if explanation is not already in session state
-                        if explanation_key not in st.session_state:
-                            st.session_state[explanation_key] = get_gemini_explanation(prompt)
-                        
-                        explanation = st.session_state[explanation_key]
-                        
-                        if explanation:
+                        if explanation_text:
                             st.markdown("---")
                             st.subheader("Gemini Explanation:")
-                            st.write(explanation)
+                            st.write(explanation_text)
                         else:
                             st.error("Could not generate explanation.")
 
