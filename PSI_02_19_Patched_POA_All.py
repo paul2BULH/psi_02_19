@@ -112,10 +112,12 @@ class PSICalculator:
         ]
 
         # Structured PSI_04 rules for better readability and maintainability
+        # Changed 'secondary_dx_not_poa' to 'secondary_dx' for PSI_04 inclusions
+        # as per PSI_04_Desc.txt which does not specify 'not POA' for these.
         self.psi04_rules = {
             'STRATUM_SHOCK': {
                 'inclusion': {
-                    'secondary_dx_not_poa': ['FTR5DX'],
+                    'secondary_dx': ['FTR5DX'], # Changed from secondary_dx_not_poa
                     'procedure_after_or': {'code_set': 'FTR5PR', 'min_days_after_or': 0, 'inclusive_min': True}
                 },
                 'exclusions': {
@@ -128,7 +130,7 @@ class PSICalculator:
             },
             'STRATUM_SEPSIS': {
                 'inclusion': {
-                    'secondary_dx_not_poa': ['FTR4DX']
+                    'secondary_dx': ['FTR4DX'] # Changed from secondary_dx_not_poa
                 },
                 'exclusions': {
                     # FTR4DX is for sepsis diagnosis codes (used for both inclusion and principal exclusion)
@@ -138,7 +140,7 @@ class PSICalculator:
             },
             'STRATUM_PNEUMONIA': {
                 'inclusion': {
-                    'secondary_dx_not_poa': ['FTR3DX']
+                    'secondary_dx': ['FTR3DX'] # Changed from secondary_dx_not_poa
                 },
                 'exclusions': {
                     'principal_dx': ['FTR3DX', 'FTR3EXA'],
@@ -149,7 +151,7 @@ class PSICalculator:
             },
             'STRATUM_GI_HEMORRHAGE': {
                 'inclusion': {
-                    'secondary_dx_not_poa': ['FTR6DX']
+                    'secondary_dx': ['FTR6DX'] # Changed from secondary_dx_not_poa
                 },
                 'exclusions': {
                     'principal_dx': ['FTR6DX', 'TRAUMID', 'ALCHLSM', 'FTR6EX'],
@@ -161,7 +163,7 @@ class PSICalculator:
             },
             'STRATUM_DVT_PE': {
                 'inclusion': {
-                    'secondary_dx_not_poa': ['FTR2DXB']
+                    'secondary_dx': ['FTR2DXB'] # Changed from secondary_dx_not_poa
                 },
                 'exclusions': {
                     'principal_dx': ['FTR2DXB', 'OBEMBOL']
@@ -908,10 +910,10 @@ class PSICalculator:
         meets_inclusion = False
         inclusion_rules = stratum_rules.get('inclusion', {})
 
-        # Secondary DX (not POA)
-        for code_set_name in inclusion_rules.get('secondary_dx_not_poa', []):
-            if any(dx_entry['code'] in appendix.get(code_set_name, set()) and
-                   (dx_entry['poa'] in ['N', 'U', 'W', None] or pd.isna(dx_entry['poa']))
+        # Secondary DX (any POA status for PSI_04 strata inclusions)
+        # This is the key change based on PSI_04_Desc.txt not specifying "not POA"
+        for code_set_name in inclusion_rules.get('secondary_dx', []): # Changed from 'secondary_dx_not_poa'
+            if any(dx_entry['code'] in appendix.get(code_set_name, set())
                    for dx_entry in all_diagnoses[1:]): # Secondary diagnoses only
                 meets_inclusion = True
                 break
@@ -2242,4 +2244,3 @@ if __name__ == "__main__":
     result_df = pd.DataFrame(output_rows)
     result_df.to_excel("PSI_02_19_Output_Result.xlsx", index=False)
     print("✅ Analysis complete. Output saved to PSI_02_19_Output_Result.xlsx")
-
