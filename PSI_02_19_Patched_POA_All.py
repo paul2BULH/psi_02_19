@@ -131,7 +131,8 @@ class PSICalculator:
                     'secondary_dx_not_poa': ['FTR4DX']
                 },
                 'exclusions': {
-                    'principal_dx': ['FTR4DX', 'INFECID']
+                    # ADDED 'SEPSISPDX' to principal_dx exclusions for STRATUM_SEPSIS
+                    'principal_dx': ['FTR4DX', 'INFECID', 'SEPSISPDX']
                 }
             },
             'STRATUM_PNEUMONIA': {
