@@ -102,8 +102,7 @@ class PSICalculator:
             # Populate with actual codes from code_sets, not just the code set names
             self.all_psi15_injury_dx_codes.update(self.code_sets.get(system_map['dx_codes'], set()))
 
-    # PSI_04 Strata Definitions (for internal use)
-        # Ordered by priority as per JSON (1 is highest)
+        # PSI_04 Strata Definitions (for internal use) - Ordered by priority as per JSON (1 is highest)
         self.psi04_strata_priority = [
             'STRATUM_SHOCK',
             'STRATUM_SEPSIS',
@@ -111,6 +110,63 @@ class PSICalculator:
             'STRATUM_GI_HEMORRHAGE',
             'STRATUM_DVT_PE'
         ]
+
+        # Structured PSI_04 rules for better readability and maintainability
+        self.psi04_rules = {
+            'STRATUM_SHOCK': {
+                'inclusion': {
+                    'secondary_dx_not_poa': ['FTR5DX'],
+                    'procedure_after_or': {'code_set': 'FTR5PR', 'min_days_after_or': 0, 'inclusive_min': True}
+                },
+                'exclusions': {
+                    'principal_dx': ['FTR5DX', 'TRAUMID', 'HEMORID', 'GASTRID', 'FTR5EX'],
+                    'secondary_dx_combined': [
+                        {'dx_code_set_1': 'FTR6GV', 'principal_dx_code_set_2': 'FTR6QD'}
+                    ],
+                    'mdc': [4, 5]
+                }
+            },
+            'STRATUM_SEPSIS': {
+                'inclusion': {
+                    'secondary_dx_not_poa': ['FTR4DX']
+                },
+                'exclusions': {
+                    'principal_dx': ['FTR4DX', 'INFECID']
+                }
+            },
+            'STRATUM_PNEUMONIA': {
+                'inclusion': {
+                    'secondary_dx_not_poa': ['FTR3DX']
+                },
+                'exclusions': {
+                    'principal_dx': ['FTR3DX', 'FTR3EXA'],
+                    'any_dx': ['FTR3EXB'],
+                    'any_proc': ['LUNGCIP'],
+                    'mdc': [4]
+                }
+            },
+            'STRATUM_GI_HEMORRHAGE': {
+                'inclusion': {
+                    'secondary_dx_not_poa': ['FTR6DX']
+                },
+                'exclusions': {
+                    'principal_dx': ['FTR6DX', 'TRAUMID', 'ALCHLSM', 'FTR6EX'],
+                    'secondary_dx_combined': [
+                        {'dx_code_set_1': 'FTR6GV', 'principal_dx_code_set_2': 'FTR6QD'}
+                    ],
+                    'mdc': [6, 7]
+                }
+            },
+            'STRATUM_DVT_PE': {
+                'inclusion': {
+                    'secondary_dx_not_poa': ['FTR2DXB']
+                },
+                'exclusions': {
+                    'principal_dx': ['FTR2DXB', 'OBEMBOL']
+                }
+            }
+        }
+
 
     def _load_code_sets(self, codes_source_path: str) -> Dict[str, Set[str]]:
         """
@@ -833,72 +889,74 @@ class PSICalculator:
                                       all_procedures: List[Dict[str, pd.Timestamp]],
                                       first_or_proc_date: pd.Timestamp) -> bool:
         """
-        Helper function to check if a patient qualifies for a specific PSI_04 stratum.
+        Helper function to check if a patient qualifies for a specific PSI_04 stratum
+        based on structured rules.
         Assumes general denominator criteria (DRG, ORPROC presence) are already met.
         """
-        psi04_def = self.psi_definitions.get('PSI_04', {})
-        strata_defs = psi04_def.get('strata_definitions', {})
-        stratum_data = strata_defs.get(stratum_name, {})
-
-        # Check stratum inclusion criteria
-        meets_inclusion = False
-        # Inclusion criteria are typically diagnoses secondary and not POA, or procedures with timing
-        principal_dx_code = all_diagnoses[0]['code'] if all_diagnoses else None
-
-        if stratum_name == 'STRATUM_SHOCK':
-            # Inclusion: Secondary FTR5DX* (not POA) OR any FTR5PR* procedure (same day as or after first OR procedure)
-            has_secondary_ftr5dx = any(dx_entry['code'] in appendix.get('FTR5DX', set()) and (dx_entry['poa'] in ['N', 'U', 'W', None] or pd.isna(dx_entry['poa'])) for dx_entry in all_diagnoses[1:])
-            has_ftr5pr_after_or = self._check_procedure_timing(all_procedures, first_or_proc_date, 'FTR5PR', min_days=0, inclusive_min=True)
-            meets_inclusion = has_secondary_ftr5dx or has_ftr5pr_after_or
-        elif stratum_name == 'STRATUM_SEPSIS':
-            # Inclusion: Secondary FTR4DX* (not POA)
-            meets_inclusion = any(dx_entry['code'] in appendix.get('FTR4DX', set()) and (dx_entry['poa'] in ['N', 'U', 'W', None] or pd.isna(dx_entry['poa'])) for dx_entry in all_diagnoses[1:])
-        elif stratum_name == 'STRATUM_PNEUMONIA':
-            # Inclusion: Secondary FTR3DX* (not POA)
-            meets_inclusion = any(dx_entry['code'] in appendix.get('FTR3DX', set()) and (dx_entry['poa'] in ['N', 'U', 'W', None] or pd.isna(dx_entry['poa'])) for dx_entry in all_diagnoses[1:])
-        elif stratum_name == 'STRATUM_GI_HEMORRHAGE':
-            # Inclusion: Secondary FTR6DX* (not POA)
-            meets_inclusion = any(dx_entry['code'] in appendix.get('FTR6DX', set()) and (dx_entry['poa'] in ['N', 'U', 'W', None] or pd.isna(dx_entry['poa'])) for dx_entry in all_diagnoses[1:])
-        elif stratum_name == 'STRATUM_DVT_PE':
-            # Inclusion: Secondary FTR2DXB* (not POA)
-            meets_inclusion = any(dx_entry['code'] in appendix.get('FTR2DXB', set()) and (dx_entry['poa'] in ['N', 'U', 'W', None] or pd.isna(dx_entry['poa'])) for dx_entry in all_diagnoses[1:])
-
-        if not meets_inclusion:
+        stratum_rules = self.psi04_rules.get(stratum_name)
+        if not stratum_rules:
+            print(f"Warning: No structured rules found for stratum: {stratum_name}")
             return False
 
-        # Check stratum exclusion criteria
+        principal_dx_code = all_diagnoses[0]['code'] if all_diagnoses else None
         mdc = row.get('MDC')
         mdc_int = int(mdc) if pd.notna(mdc) else None
 
-        for excl_rule_str in stratum_data.get('exclusion_criteria', []):
-            # Parse exclusion rules from string descriptions (simplified for this context)
-            # This is a brittle approach; a more robust JSON rule parser would be better.
-            if "Principal diagnosis of" in excl_rule_str:
-                code_ref_name_part = excl_rule_str.split("Principal diagnosis of ")[1].split(" ")[0]
-                code_ref_name = code_ref_name_part.replace("(", "").replace(")", "").replace("*", "")
-                if principal_dx_code and principal_dx_code in appendix.get(code_ref_name, set()):
-                    return False
-            elif "Any diagnosis of" in excl_rule_str:
-                code_ref_name_part = excl_rule_str.split("Any diagnosis of ")[1].split(" ")[0]
-                code_ref_name = code_ref_name_part.replace("(", "").replace(")", "").replace("*", "")
-                if any(dx_entry['code'] in appendix.get(code_ref_name, set()) for dx_entry in all_diagnoses):
-                    return False
-            elif "Esophageal varices with bleeding" in excl_rule_str:
-                has_ftr6gv = any(dx_entry['code'] in appendix.get('FTR6GV', set()) for dx_entry in all_diagnoses)
-                has_ftr6qd = any(dx_entry['code'] in appendix.get('FTR6QD', set()) for dx_entry in all_diagnoses)
-                if has_ftr6gv and has_ftr6qd:
-                    return False
-            elif "MDC 4 (Respiratory)" in excl_rule_str and mdc_int == 4:
+        # --- Check Stratum Inclusion Criteria ---
+        meets_inclusion = False
+        inclusion_rules = stratum_rules.get('inclusion', {})
+
+        # Secondary DX (not POA)
+        for code_set_name in inclusion_rules.get('secondary_dx_not_poa', []):
+            if any(dx_entry['code'] in appendix.get(code_set_name, set()) and
+                   (dx_entry['poa'] in ['N', 'U', 'W', None] or pd.isna(dx_entry['poa']))
+                   for dx_entry in all_diagnoses[1:]): # Secondary diagnoses only
+                meets_inclusion = True
+                break
+
+        # Procedure after OR (if not already included)
+        if not meets_inclusion and 'procedure_after_or' in inclusion_rules:
+            proc_rule = inclusion_rules['procedure_after_or']
+            if self._check_procedure_timing(all_procedures, first_or_proc_date,
+                                            proc_rule['code_set'],
+                                            min_days=proc_rule['min_days_after_or'],
+                                            inclusive_min=proc_rule['inclusive_min']):
+                meets_inclusion = True
+
+        if not meets_inclusion:
+            return False # Must meet at least one inclusion criterion
+
+        # --- Check Stratum Exclusion Criteria ---
+        exclusion_rules = stratum_rules.get('exclusions', {})
+
+        # Principal DX exclusions
+        for code_set_name in exclusion_rules.get('principal_dx', []):
+            if principal_dx_code and principal_dx_code in appendix.get(code_set_name, set()):
                 return False
-            elif "MDC 5 (Circulatory)" in excl_rule_str and mdc_int == 5:
+
+        # Secondary DX (combined) exclusions (e.g., FTR6GV + FTR6QD)
+        for combined_rule in exclusion_rules.get('secondary_dx_combined', []):
+            dx_set1 = appendix.get(combined_rule['dx_code_set_1'], set())
+            dx_set2 = appendix.get(combined_rule['principal_dx_code_set_2'], set())
+            has_dx1 = any(dx_entry['code'] in dx_set1 for dx_entry in all_diagnoses)
+            has_dx2_principal = principal_dx_code and principal_dx_code in dx_set2
+            if has_dx1 and has_dx2_principal:
                 return False
-            elif "MDC 6 (Digestive)" in excl_rule_str and mdc_int == 6:
+
+        # Any DX exclusions (any position, any POA status)
+        for code_set_name in exclusion_rules.get('any_dx', []):
+            if any(dx_entry['code'] in appendix.get(code_set_name, set()) for dx_entry in all_diagnoses):
                 return False
-            elif "MDC 7 (Hepatobiliary)" in excl_rule_str and mdc_int == 7:
+
+        # Any Procedure exclusions
+        for code_set_name in exclusion_rules.get('any_proc', []):
+            if any(proc_entry['code'] in appendix.get(code_set_name, set()) for proc_entry in all_procedures):
                 return False
-            elif "Any procedure for lung cancer" in excl_rule_str:
-                if any(proc_entry['code'] in appendix.get('LUNGCIP', set()) for proc_entry in all_procedures):
-                    return False
+
+        # MDC exclusions
+        for excluded_mdc in exclusion_rules.get('mdc', []):
+            if mdc_int is not None and mdc_int == excluded_mdc:
+                return False
 
         return True # Meets inclusion and no stratum-specific exclusions
 
@@ -928,7 +986,7 @@ class PSICalculator:
         mdc = row.get('MDC')
         principal_dx_code = all_diagnoses[0]['code'] if all_diagnoses else None
         is_obstetric_mdc14 = (pd.notna(mdc) and int(mdc) == 14) and \
-                             (principal_dx_code and str(principal_dx_code) in self.code_sets.get('MDC14PRINDX', set()))
+                             (principal_dx_code and str(principal_dx_code).strip().upper() in set(code.strip().upper() for code in self.code_sets.get('MDC14PRINDX', set())))
 
         if not is_obstetric_mdc14:
             if pd.isna(age) or not (18 <= int(age) <= 89):
