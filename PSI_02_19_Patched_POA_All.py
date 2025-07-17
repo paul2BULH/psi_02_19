@@ -593,6 +593,7 @@ class PSICalculator:
         psi_def = self.psi_definitions.get(psi_code, {})
         # Note: 'indicator' is nested inside the PSI definition in the JSON, get() is safer
         population_type = psi_def.get('indicator', {}).get('population_type')
+        
         age = row.get("AGE")
         if pd.isna(age):
             return "Exclusion", "Data Exclusion: Missing 'AGE' field"
@@ -603,8 +604,6 @@ class PSICalculator:
                 age_int = int(age)
         except (ValueError, TypeError):
             return "Exclusion", f"Data Exclusion: Invalid 'AGE' value: {age}"
-        if population_type == "adult" and age_int < 18:
-            return "Exclusion", f"Population Exclusion: Age {age_int} < 18 (adult population)"
 
         # Dynamically determine required fields based on PSI definition's data_quality rules
         # FIX: Added 'Discharge_Disposition' as a universally required field for robust data quality.
@@ -635,32 +634,20 @@ class PSICalculator:
                 return "Exclusion", f"Data Exclusion: Missing required field '{field}'"
 
         # Age exclusion logic based on population type
-        age = row.get('AGE')
-        if pd.isna(age) or not isinstance(age, (int, float)):
-             return "Exclusion", "Data Exclusion: Invalid or missing 'AGE'"
-        age = int(age) # Convert to int after checking for NaN/type
+        # Check for PSI_04, PSI_05, PSI_07 specific obstetric age allowance FIRST
+        is_obstetric_any_age_allowed = False
+        if psi_code in ['PSI_04', 'PSI_05', 'PSI_07']:
+            mdc = row.get('MDC')
+            pdx = row.get('Pdx')
+            if pd.notna(mdc) and int(mdc) == 14 and pd.notna(pdx) and str(pdx).strip().upper() in set(code.strip().upper() for code in self.code_sets.get('MDC14PRINDX', set())):
+                is_obstetric_any_age_allowed = True
 
-        if population_type == 'adult':
-            if age < 18:
-                return "Exclusion", "Population Exclusion: Age < 18"
+        if population_type == 'adult' and age_int < 18 and not is_obstetric_any_age_allowed:
+            return "Exclusion", f"Population Exclusion: Age {age_int} < 18 (adult population and not an obstetric patient)"
         elif population_type == 'newborn_only':
-            # For newborn PSIs, age < 18 is expected, so no exclusion here.
-            pass
-        elif population_type in ['maternal_obstetric', 'elective_surgical_only', 'surgical_only', 'abdominopelvic_surgical', 'medical_and_surgical']:
-            # For these, age >= 18 is generally expected, but obstetric patients can be any age.
-            # Check for specific age criteria in PSI definition, otherwise apply general age < 18.
-
-            # For PSI_04, PSI_05 and PSI_07, obstetric hospitalizations for patients of any age are allowed
-            is_obstetric_any_age_allowed = False
-            if psi_code in ['PSI_04', 'PSI_05', 'PSI_07']: # ADDED 'PSI_04' HERE
-                # Obstetric: MDC == 14 and principal dx in MDC14PRINDX
-                mdc = row.get('MDC')
-                pdx = row.get('Pdx')
-                if pd.notna(mdc) and int(mdc) == 14 and pd.notna(pdx) and str(pdx).strip().upper() in set(code.strip().upper() for code in self.code_sets.get('MDC14PRINDX', set())):
-                    is_obstetric_any_age_allowed = True
-
-            if not is_obstetric_any_age_allowed and age < 18:
-                         return "Exclusion", "Population Exclusion: Age < 18 and not an obstetric patient"
+            pass # Newborn PSIs don't exclude based on age < 18
+        elif age_int < 18 and not is_obstetric_any_age_allowed: # General case for other PSIs not specifically allowing any age for obstetric
+            return "Exclusion", f"Population Exclusion: Age {age_int} < 18"
 
 
         # MDC 15 (Newborn) exclusion logic based on population type
@@ -685,7 +672,7 @@ class PSICalculator:
                     # Check if Pdx is in MDC14PRINDX (specific to principal DX rule)
                     pdx = row.get('Pdx')
                     if pd.notna(pdx) and str(pdx) in self.code_sets.get('MDC14PRINDX', set()):
-                        if population_type != 'maternal_obstetric' and psi_code not in ['PSI_05', 'PSI_07']: # Only exclude if not an obstetric-specific PSI or PSI_05
+                        if population_type != 'maternal_obstetric' and psi_code not in ['PSI_05', 'PSI_07', 'PSI_04']: # Only exclude if not an obstetric-specific PSI or PSI_05/07/04
                             return "Exclusion", "Population Exclusion: MDC 14 - Obstetric (principal dx in MDC14PRINDX)"
             except ValueError:
                 return "Exclusion", "Data Exclusion: Invalid MDC value"
