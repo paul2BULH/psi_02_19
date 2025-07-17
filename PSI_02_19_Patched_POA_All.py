@@ -65,9 +65,13 @@ class PSICalculator:
         # Store the keys of anatomic_site_map for later lookup of code set names
         self.all_specific_pu_codes_keys_from_map: Set[str] = set(self.anatomic_site_map.keys())
 
+        # Initialize all_specific_pu_codes as an empty set BEFORE updating it
+        self.all_specific_pu_codes: Set[str] = set()
+
         # Populate self.all_specific_pu_codes with actual ICD-10 codes for specific pressure ulcers
         # This is corrected to get the actual codes from the appendix.
-        self.all_specific_pu_codes.update(self.code_sets.get(code_set_name, set()) for code_set_name in self.all_specific_pu_codes_keys_from_map)
+        for code_set_name in self.all_specific_pu_codes_keys_from_map:
+            self.all_specific_pu_codes.update(self.code_sets.get(code_set_name, set()))
 
 
         # PI~EXD* codes for principal/POA=Y secondary exclusion (union of PI and DTI exclusions)
