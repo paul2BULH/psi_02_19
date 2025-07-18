@@ -169,7 +169,7 @@ def display_dashboard(df):
 def get_gemini_explanation(prompt: str) -> str:
     """Fetches an explanation from the Gemini API."""
     chat_history = []
-    chat_history.push({"role": "user", "parts": [{"text": prompt}]})
+    chat_history.append({"role": "user", "parts": [{"text": prompt}]}) # Changed .push to .append
     payload = {"contents": chat_history}
 
     try:
@@ -334,7 +334,7 @@ if uploaded_file:
                 else:
                     st.success("🎉 No PSI inclusions found - All encounters passed safety checks!")
             else:
-                display_results_table(st.session_state.results_df, debug_mode)
+                display_results_table(inclusions_df, debug_mode)
             
             if st.session_state.error_df is not None and not st.session_state.error_df.empty:
                 st.subheader("⚠️ Error Log")
@@ -354,4 +354,3 @@ else:
         st.session_state.analysis_complete = False
         st.session_state.debug_reports = {}
         st.session_state.gemini_explanations = {}
-
