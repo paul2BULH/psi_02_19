@@ -7,23 +7,52 @@ import requests # Import the requests library for API calls
 st.set_page_config(page_title="PSI Analyzer", layout="wide")
 st.title("🧬 Patient Safety Indicator (PSI) Analyzer")
 
+# Initialize session state variables if they don't exist
 if 'results_df' not in st.session_state:
     st.session_state.results_df = None
 if 'error_df' not in st.session_state:
     st.session_state.error_df = None
 if 'analysis_complete' not in st.session_state:
     st.session_state.analysis_complete = False
+if 'debug_reports' not in st.session_state:
+    st.session_state.debug_reports = {}
+if 'gemini_explanations' not in st.session_state:
+    st.session_state.gemini_explanations = {}
 
 PSI_CODES = [f"PSI_{i:02}" for i in range(2, 20) if i != 16]
 
-# GLOBAL debug storage (by encounter, psi)
-if 'debug_reports' not in st.session_state:
-    st.session_state.debug_reports = {}
+# Define required columns for the input DataFrame
+REQUIRED_COLUMNS = ["EncounterID", "AGE", "MDC", "MS-DRG", "Pdx"]
 
-class DebugPSICalculator(PSICalculator):
-    def debug_forensic_report(self, row, psi_code, status, rationale):
+class DebugPSICalculator:
+    """
+    A wrapper class for PSICalculator that adds forensic debug reporting capabilities.
+    This decouples the debugging logic from the core PSI evaluation.
+    """
+    def __init__(self, codes_source_path, psi_definitions_path):
+        self.psi_calculator = PSICalculator(codes_source_path, psi_definitions_path)
+        self.codes_source_path = codes_source_path
+        self.psi_definitions_path = psi_definitions_path
+
+    def evaluate_psi(self, row: pd.Series, psi_code: str):
+        """
+        Evaluates PSI for a given row and generates a debug report if debug mode is active.
+        """
+        # Call the actual PSI calculation from the wrapped calculator
+        status, rationale, _, _ = self.psi_calculator.evaluate_psi(row, psi_code)
+
+        # Generate and store the forensic report
+        enc_id = row.get('EncounterID', 'UNKNOWN')
+        key = (enc_id, psi_code)
+        report = self._generate_forensic_report(row, psi_code, status, rationale)
+        st.session_state.debug_reports[key] = report
+        
+        return status, rationale, psi_code, {}
+
+    def _generate_forensic_report(self, row, psi_code, status, rationale):
         """
         Generates a deep forensic debug report for any encounter and PSI.
+        Accesses internal data/methods of the wrapped psi_calculator for detailed info.
         """
         report_lines = []
         enc_id = row.get('EncounterID', 'UNKNOWN')
@@ -31,6 +60,7 @@ class DebugPSICalculator(PSICalculator):
         mdc = row.get('MDC')
         drg = row.get('MS-DRG')
         pdx = row.get('Pdx')
+
         report_lines.append(f"=== FORENSIC DEBUG: EncounterID {enc_id}, PSI {psi_code} ===")
         report_lines.append(f"Status: {status}")
         report_lines.append(f"Rationale: {rationale}")
@@ -39,15 +69,18 @@ class DebugPSICalculator(PSICalculator):
         report_lines.append(f"MDC: {mdc} (type: {type(mdc)})")
         report_lines.append(f"MS-DRG: {drg} (type: {type(drg)})")
         report_lines.append(f"Pdx: '{pdx}' (type: {type(pdx)})")
-        if hasattr(self, '_get_all_diagnoses'):
-            diagnoses = self._get_all_diagnoses(row)
+
+        # Accessing private methods of the wrapped calculator for detailed diagnostics
+        if hasattr(self.psi_calculator, '_get_all_diagnoses'):
+            diagnoses = self.psi_calculator._get_all_diagnoses(row)
             report_lines.append(f"All Diagnoses: {diagnoses}")
-        if hasattr(self, '_get_all_procedures'):
-            procedures = self._get_all_procedures(row)
+        if hasattr(self.psi_calculator, '_get_all_procedures'):
+            procedures = self.psi_calculator._get_all_procedures(row)
             report_lines.append(f"All Procedures: {procedures}")
-        # Obstetric path (MDC 14)
+
+        # Obstetric path (MDC 14) specific debug
         try:
-            mdc14prindx = self.code_sets.get('MDC14PRINDX', set())
+            mdc14prindx = self.psi_calculator.code_sets.get('MDC14PRINDX', set())
             if pd.notna(mdc) and str(mdc) == "14":
                 pdx_str = str(pdx)
                 upper_match = pdx_str.strip().upper() in {c.strip().upper() for c in mdc14prindx}
@@ -57,10 +90,11 @@ class DebugPSICalculator(PSICalculator):
                 report_lines.append(f"O10019 in set: {'O10019' in {c.strip().upper() for c in mdc14prindx}}")
         except Exception as e:
             report_lines.append(f"[Obstetric Path Debug Failed: {e}]")
-        # DRG/age logic for surgical/medical
+
+        # DRG/age logic for surgical/medical specific debug
         try:
-            surg_set = self.code_sets.get('SURGI2R', set())
-            med_set = self.code_sets.get('MEDIC2R', set())
+            surg_set = self.psi_calculator.code_sets.get('SURGI2R', set())
+            med_set = self.psi_calculator.code_sets.get('MEDIC2R', set())
             drg_val = str(drg).strip().upper() if pd.notna(drg) else ''
             drg_surg = drg_val in {c.strip().upper() for c in surg_set}
             drg_med = drg_val in {c.strip().upper() for c in med_set}
@@ -68,33 +102,36 @@ class DebugPSICalculator(PSICalculator):
             report_lines.append(f"Medical DRG match: {drg_med}")
         except Exception as e:
             report_lines.append(f"[DRG Path Debug Failed: {e}]")
-        # Final output
+
         report_lines.append("=" * 60)
         return "\n".join(report_lines)
 
-    def evaluate_psi(self, row: pd.Series, psi_code: str):
-        # Run standard exclusion and logic
-        status, rationale, _, _ = super().evaluate_psi(row, psi_code)
-        # Save forensic report for this row/PSI if debug mode is enabled
-        key = (row.get('EncounterID'), psi_code)
-        report = self.debug_forensic_report(row, psi_code, status, rationale)
-        st.session_state.debug_reports[key] = report
-        return status, rationale, psi_code, {}
-
 def run_psi_analysis(df, calculator, debug_mode=False):
+    """
+    Runs the PSI analysis on the DataFrame and collects results and errors.
+    Includes enhanced progress reporting.
+    """
     results = []
     errors = []
+    
+    # Clear previous debug reports and Gemini explanations
+    st.session_state.debug_reports = {}  
+    st.session_state.gemini_explanations = {}
+
+    total_encounters = len(df)
+    total_evaluations = total_encounters * len(PSI_CODES)
+    current_evaluation = 0
+
     progress_bar = st.progress(0)
     status_text = st.empty()
-    st.session_state.debug_reports = {}  # Clear previous debug reports
-    total_evaluations = len(df) * len(PSI_CODES)
-    current_evaluation = 0
 
     for idx, row in df.iterrows():
         enc_id = row.get("EncounterID", f"Row{idx+1}")
-        status_text.text(f"Processing encounter {idx+1}/{len(df)}: {enc_id}")
+        status_text.text(f"Processing Encounter {idx+1}/{total_encounters}: {enc_id}...")
+        
         for psi_code in PSI_CODES:
             try:
+                # Use the evaluate_psi from the (Debug)PSICalculator instance
                 status, rationale, _, _ = calculator.evaluate_psi(row, psi_code)
                 results.append({
                     "EncounterID": enc_id,
@@ -110,11 +147,13 @@ def run_psi_analysis(df, calculator, debug_mode=False):
                 })
             current_evaluation += 1
             progress_bar.progress(current_evaluation / total_evaluations)
+    
     progress_bar.empty()
     status_text.empty()
     return pd.DataFrame(results), pd.DataFrame(errors)
 
 def display_dashboard(df):
+    """Displays a summary dashboard of PSI results."""
     if df is None or "Status" not in df.columns:
         return
     total = len(df)
@@ -127,116 +166,16 @@ def display_dashboard(df):
     col3.metric("Exclusions", exclusions)
     col4.metric("Errors", errors)
 
-def get_gemini_explanation(prompt: str, row: pd.Series, psi_code: str, calculator: PSICalculator) -> str:
-    """
-    Fetches an explanation from the Gemini API, incorporating content-aware details
-    from PSI definitions and code sets.
-    """
+def get_gemini_explanation(prompt: str) -> str:
+    """Fetches an explanation from the Gemini API."""
     chat_history = []
-    
-    # Build content-aware context for the prompt
-    context_lines = []
-    context_lines.append(f"\n--- Context for {psi_code} Analysis ---")
-    
-    psi_def = calculator.psi_definitions.get(psi_code, {})
-    population_type = psi_def.get('indicator', {}).get('population_type', 'N/A')
-    context_lines.append(f"PSI Type: {psi_def.get('indicator', {}).get('name', 'N/A')}")
-    context_lines.append(f"Population Type: {population_type}")
-
-    # Add relevant diagnoses and procedures from the patient's row that match known code sets
-    all_diagnoses = calculator._get_all_diagnoses(row)
-    all_procedures = calculator._get_all_procedures(row)
-
-    relevant_code_info = []
-
-    # Iterate through PSI definition to find relevant code sets
-    # This part can be made more sophisticated to parse all rules, but for simplicity,
-    # we'll look for common patterns or hardcode for known PSIs if structure is complex.
-    
-    # Example for PSI_04 (as it was the last point of discussion)
-    if psi_code == 'PSI_04':
-        context_lines.append("\nPSI_04 Specific Rules (simplified):")
-        context_lines.append("- Denominator requires surgical DRG (SURGI2R), OR procedure (ORPROC), and specific age/obstetric criteria.")
-        context_lines.append("- Must have one of 5 serious complications (Shock, Sepsis, Pneumonia, GI Hemorrhage, DVT/PE) based on specific secondary diagnoses/procedures.")
-        context_lines.append("- Exclusions apply for principal diagnoses matching complication codes, transfers, hospice, newborn MDC15.")
-
-        # Check for relevant codes in patient data against PSI_04 rules
-        relevant_psi04_code_sets = set()
-        for stratum_name, rules in calculator.psi04_rules.items():
-            for rule_type, rule_values in rules.get('inclusion', {}).items():
-                if rule_type == 'secondary_dx':
-                    relevant_psi04_code_sets.update(rule_values)
-                elif rule_type == 'procedure_after_or':
-                    relevant_psi04_code_sets.add(rule_values['code_set'])
-            for rule_type, rule_values in rules.get('exclusions', {}).items():
-                if rule_type in ['principal_dx', 'any_dx', 'any_proc']:
-                    relevant_psi04_code_sets.update(rule_values)
-                elif rule_type == 'secondary_dx_combined':
-                    relevant_psi04_code_sets.add(rule_values['dx_code_set_1'])
-                    relevant_psi04_code_sets.add(rule_values['principal_dx_code_set_2'])
-        
-        # Add general PSI_04 relevant sets
-        relevant_psi04_code_sets.add('SURGI2R')
-        relevant_psi04_code_sets.add('ORPROC')
-        relevant_psi04_code_sets.add('MDC14PRINDX')
-        relevant_psi04_code_sets.add('MDC15PRINDX')
-        relevant_psi04_code_sets.add('DISP') # For discharge disposition
-        relevant_psi04_code_sets.add('POINTOFORIGINUB04') # For admission source
-
-        for dx_entry in all_diagnoses:
-            dx_code = dx_entry['code']
-            poa_status = dx_entry['poa']
-            for cs_name in relevant_psi04_code_sets:
-                current_code_set = calculator.code_sets.get(cs_name, set())
-                if dx_code in current_code_set:
-                    # Ensure elements are strings for display and handle empty set gracefully
-                    sample_codes = ', '.join(list(current_code_set)[:3]) if current_code_set else "N/A"
-                    relevant_code_info.append(f"- Diagnosis '{dx_code}' (POA: {poa_status}) is in code set '{cs_name}' (e.g., {sample_codes}...)")
-                    break # Found a match, move to next dx_entry
-
-        for proc_entry in all_procedures:
-            proc_code = proc_entry['code']
-            for cs_name in relevant_psi04_code_sets:
-                current_code_set = calculator.code_sets.get(cs_name, set())
-                if proc_code in current_code_set:
-                    sample_codes = ', '.join(list(current_code_set)[:3]) if current_code_set else "N/A"
-                    relevant_code_info.append(f"- Procedure '{proc_code}' is in code set '{cs_name}' (e.g., {sample_codes}...)")
-                    break # Found a match, move to next proc_entry
-    
-    # Add a generic fallback for other PSIs if specific logic isn't implemented yet
-    else:
-        context_lines.append("\nGeneral Code Set Matches:")
-        # For other PSIs, iterate through all patient diagnoses/procedures
-        # and see if they match any known code sets.
-        for dx_entry in all_diagnoses:
-            dx_code = dx_entry['code']
-            poa_status = dx_entry['poa']
-            for cs_name, codes in calculator.code_sets.items():
-                if dx_code in codes:
-                    sample_codes = ', '.join(list(codes)[:3]) if codes else "N/A"
-                    relevant_code_info.append(f"- Diagnosis '{dx_code}' (POA: {poa_status}) is in code set '{cs_name}' (e.g., {sample_codes}...)")
-                    break
-        for proc_entry in all_procedures:
-            proc_code = proc_entry['code']
-            for cs_name, codes in calculator.code_sets.items():
-                if proc_code in codes:
-                    sample_codes = ', '.join(list(codes)[:3]) if codes else "N/A"
-                    relevant_code_info.append(f"- Procedure '{proc_code}' is in code set '{cs_name}' (e.g., {sample_codes}...)")
-                    break
-
-    if relevant_code_info:
-        context_lines.append("Relevant patient data found in the following code sets:")
-        context_lines.extend(relevant_code_info)
-    else:
-        context_lines.append("No specific code set matches found for this patient data in the context of this PSI.")
-
-
-    full_prompt = f"{prompt}\n\n{' '.join(context_lines)}\n\nBased on the provided PSI definition, the patient's data, and the relevant code sets, provide a detailed and clear explanation for why this encounter received the '{row['Status']}' status for {psi_code}. Focus on how specific data points (diagnoses, procedures, age, DRG, POA status, etc.) interact with the PSI's rules and the provided code sets."
-
-    chat_history.append({"role": "user", "parts": [{"text": full_prompt}]})
+    chat_history.push({"role": "user", "parts": [{"text": prompt}]})
     payload = {"contents": chat_history}
 
     try:
+        # Retrieve API key from Streamlit secrets
+        # Ensure you have a [secrets] section in .streamlit/secrets.toml
+        # with gemini_api_key = "YOUR_API_KEY_HERE"
         apiKey = st.secrets["gemini_api_key"]
     except KeyError:
         return "Error: Gemini API key not found in Streamlit secrets. Please configure it."
@@ -245,7 +184,7 @@ def get_gemini_explanation(prompt: str, row: pd.Series, psi_code: str, calculato
     
     try:
         response = requests.post(apiUrl, headers={'Content-Type': 'application/json'}, data=json.dumps(payload))
-        response.raise_for_status() # Raise an exception for HTTP errors
+        response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
         result = response.json()
 
         if result.get('candidates') and len(result['candidates']) > 0 and \
@@ -253,59 +192,81 @@ def get_gemini_explanation(prompt: str, row: pd.Series, psi_code: str, calculato
            len(result['candidates'][0]['content']['parts']) > 0:
             return result['candidates'][0]['content']['parts'][0]['text']
         else:
-            return "No explanation generated."
+            return "No explanation generated or unexpected API response structure."
     except requests.exceptions.RequestException as e:
         return f"Error making API request: {e}"
     except json.JSONDecodeError:
-        return "Error decoding API response."
+        return "Error decoding API response (response was not valid JSON)."
     except Exception as e:
-        return f"An unexpected error occurred: {e}"
+        return f"An unexpected error occurred during Gemini API call: {e}"
 
 def display_results_table(results_df, debug_mode=False):
+    """
+    Displays the results table with filtering, download, and optional debug/Gemini explanation features.
+    """
     col1, col2 = st.columns(2)
     with col1:
         psi_filter = st.multiselect("Filter by PSI", sorted(results_df["PSI"].unique()), key="psi_filter")
     with col2:
         status_filter = st.multiselect("Filter by Status", ["Inclusion", "Exclusion", "Error"], key="status_filter")
+    
     filtered_df = results_df.copy()
     if psi_filter:
         filtered_df = filtered_df[filtered_df["PSI"].isin(psi_filter)]
     if status_filter:
         filtered_df = filtered_df[filtered_df["Status"].isin(status_filter)]
+    
     st.write(f"Showing {len(filtered_df)} of {len(results_df)} results")
     st.dataframe(filtered_df, use_container_width=True)
     
-    # Show forensic debug for each row if debug_mode
+    # Show forensic debug for each row if debug_mode is enabled
     if debug_mode and not filtered_df.empty:
+        st.subheader("🔬 Debug Reports & Gemini Explanations")
         for i, row in filtered_df.iterrows():
-            key = (row["EncounterID"], row["PSI"])
-            report = st.session_state.debug_reports.get(key)
-            with st.expander(f"🔬 Debug: Encounter {row['EncounterID']} | {row['PSI']} | {row['Status']}"):
+            enc_id = row['EncounterID']
+            psi_code = row['PSI']
+            status = row['Status']
+            rationale = row['Rationale']
+            
+            # Key for debug report and Gemini explanation
+            report_key = (enc_id, psi_code)
+            gemini_explanation_key = f"gemini_explanation_{enc_id}_{psi_code}"
+
+            report = st.session_state.debug_reports.get(report_key)
+            
+            with st.expander(f"Encounter: {enc_id} | PSI: {psi_code} | Status: {status}"):
                 st.text(report if report else "No debug report available for this row.")
                 
                 # Add Gemini explanation button for each row in debug mode
-                # Use a unique key for each button
-                if st.button(f"✨ Explain with Gemini (Encounter: {row['EncounterID']}, PSI: {row['PSI']})", key=f"gemini_explain_{i}_{row['EncounterID']}_{row['PSI']}"):
-                    with st.spinner("Generating explanation with Gemini..."):
-                        # Pass row and calculator to get_gemini_explanation
-                        prompt_base = f"Explain the PSI result for EncounterID: {row['EncounterID']}, PSI: {row['PSI']}. Status: {row['Status']}. Rationale: {row['Rationale']}. Here is the full debug report:\n\n{report}"
-                        explanation_text = get_gemini_explanation(prompt_base, row, row['PSI'], calculator)
+                # Use a unique key for each button to prevent issues with Streamlit re-runs
+                if st.button(f"✨ Explain with Gemini", key=f"gemini_explain_btn_{i}_{enc_id}_{psi_code}"):
+                    with st.spinner(f"Generating explanation for {enc_id} - {psi_code} with Gemini..."):
+                        prompt = f"Explain the PSI result for EncounterID: {enc_id}, PSI: {psi_code}. Status: {status}. Rationale: {rationale}. Here is the full debug report:\n\n{report}"
                         
-                        # Store explanation in session state to avoid re-generating on rerun
-                        explanation_key = f"gemini_explanation_{key}"
-                        st.session_state[explanation_key] = explanation_text # Store the generated text
+                        # Only call API if explanation is not already in session state
+                        if gemini_explanation_key not in st.session_state.gemini_explanations:
+                            st.session_state.gemini_explanations[gemini_explanation_key] = get_gemini_explanation(prompt)
                         
-                        if explanation_text:
+                        explanation = st.session_state.gemini_explanations.get(gemini_explanation_key)
+                        
+                        if explanation:
                             st.markdown("---")
                             st.subheader("Gemini Explanation:")
-                            st.write(explanation_text)
+                            st.write(explanation)
                         else:
                             st.error("Could not generate explanation.")
-
+                # Display cached explanation if available and button wasn't just clicked (to avoid flicker)
+                elif gemini_explanation_key in st.session_state.gemini_explanations:
+                    explanation = st.session_state.gemini_explanations.get(gemini_explanation_key)
+                    if explanation:
+                        st.markdown("---")
+                        st.subheader("Gemini Explanation (Cached):")
+                        st.write(explanation)
 
     csv_data = filtered_df.to_csv(index=False, encoding="utf-8-sig")
     st.download_button("⬇️ Download Filtered Results", data=csv_data, file_name="PSI_Results.csv")
 
+# --- Main Application Logic ---
 uploaded_file = st.file_uploader("📂 Upload Excel or CSV File", type=["xlsx", "xls", "csv"])
 
 if uploaded_file:
@@ -314,38 +275,57 @@ if uploaded_file:
             df = pd.read_csv(uploaded_file)
         else:
             df = pd.read_excel(uploaded_file)
+        
+        # Strip whitespace from column names for consistent access
         df.columns = df.columns.str.strip()
+
         st.success(f"✅ File uploaded: {uploaded_file.name}")
         st.info(f"📊 Dimensions: {df.shape[0]} rows × {df.shape[1]} columns")
+
+        # Validate required columns
+        missing_columns = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+        if missing_columns:
+            st.error(f"❌ Missing required columns in the uploaded file: {', '.join(missing_columns)}. Please ensure your file contains these columns.")
+            st.stop() # Stop execution if essential columns are missing
+        
         try:
+            # Initialize the DebugPSICalculator which wraps the PSICalculator
             calculator = DebugPSICalculator(
                 codes_source_path="PSI_Code_Sets.json",
                 psi_definitions_path="PSI_02_19_Compiled_Cleaned.json"
             )
+            st.info(f"Using PSI Code Sets from: `{calculator.codes_source_path}`")
+            st.info(f"Using PSI Definitions from: `{calculator.psi_definitions_path}`")
+
         except Exception as e:
-            st.error(f"❌ Failed to initialize PSI Calculator: {e}")
+            st.error(f"❌ Failed to initialize PSI Calculator. Ensure 'PSI_Code_Sets.json' and 'PSI_02_19_Compiled_Cleaned.json' are available: {e}")
             st.stop()
+        
         col1, col2 = st.columns([3, 1])
         with col1:
             analyze_button = st.button("🚀 Analyze PSI", type="primary")
         with col2:
-            debug_mode = st.checkbox("🔍 Global Debug Mode (ALL Encounters/PSIs)", help="Enable forensic bug tracing for every result (may slow UI for very large files).")
+            debug_mode = st.checkbox("🔍 Global Debug Mode (ALL Encounters/PSIs)", help="Enable forensic bug tracing for every result (may slow UI for very large files). Debug reports are stored in memory.")
+        
         if analyze_button:
-            with st.spinner("🔬 Running PSI analysis..."):
+            with st.spinner("🔬 Running PSI analysis... This may take a while for large files."):
                 results_df, error_df = run_psi_analysis(df, calculator, debug_mode)
                 st.session_state.results_df = results_df
                 st.session_state.error_df = error_df
                 st.session_state.analysis_complete = True
             st.success(f"✅ Analysis completed! Generated {len(results_df)} results.")
+        
         if st.session_state.analysis_complete and st.session_state.results_df is not None:
             st.subheader("📊 Dashboard")
             display_dashboard(st.session_state.results_df)
+            
             st.subheader("📋 Results")
             view_mode = st.radio(
                 "Select View Mode:",
                 ["All Results (Complete Analysis)", "Inclusions Only (Flagged Events)"],
                 horizontal=True
             )
+            
             if view_mode == "Inclusions Only (Flagged Events)":
                 inclusions_df = st.session_state.results_df[st.session_state.results_df["Status"] == "Inclusion"]
                 if not inclusions_df.empty:
@@ -355,18 +335,23 @@ if uploaded_file:
                     st.success("🎉 No PSI inclusions found - All encounters passed safety checks!")
             else:
                 display_results_table(st.session_state.results_df, debug_mode)
+            
             if st.session_state.error_df is not None and not st.session_state.error_df.empty:
                 st.subheader("⚠️ Error Log")
                 st.error(f"Found {len(st.session_state.error_df)} errors during analysis:")
                 st.dataframe(st.session_state.error_df, use_container_width=True)
                 error_csv = st.session_state.error_df.to_csv(index=False, encoding="utf-8-sig")
                 st.download_button("⬇️ Download Error Log", data=error_csv, file_name="PSI_Errors.csv")
+    
     except Exception as e:
-        st.error(f"❌ Unexpected error: {e}")
+        st.error(f"❌ An unexpected error occurred during file processing or analysis: {e}")
 else:
     st.info("Upload a file to begin PSI analysis")
+    # Reset state when no file is uploaded, effectively clearing previous analysis
     if st.session_state.analysis_complete:
         st.session_state.results_df = None
         st.session_state.error_df = None
         st.session_state.analysis_complete = False
         st.session_state.debug_reports = {}
+        st.session_state.gemini_explanations = {}
+
