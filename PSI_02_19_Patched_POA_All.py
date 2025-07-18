@@ -114,37 +114,32 @@ class PSICalculator:
         ]
 
         # Structured PSI_04 rules for better readability and maintainability
-        # Changed 'secondary_dx_not_poa' to 'secondary_dx' for PSI_04 inclusions
-        # as per PSI_04_Desc.txt which does not specify 'not POA' for these.
+        # Note: FTR5DX POA logic for STRATUM_SHOCK is handled directly in _check_psi04_stratum_criteria
         self.psi04_rules = {
             'STRATUM_SHOCK': {
                 'inclusion': {
                     # FTR5DX secondary_dx inclusion is now handled with POA logic directly in _check_psi04_stratum_criteria
-                    # Only FTR5PR remains here for direct inclusion rule
                     'procedure_after_or': {'code_set': 'FTR5PR', 'min_days_after_or': 0, 'inclusive_min': True}
                 },
                 'exclusions': {
-                    'principal_dx': ['FTR5DX', 'TRAUMID', 'HEMORID', 'GASTRID', 'FTR5EX'], # FTR5DX as principal exclusion
+                    'principal_dx': ['FTR5DX', 'TRAUMID', 'HEMORID', 'GASTRID', 'FTR5EX'],
                     'secondary_dx_combined': [
                         {'dx_code_set_1': 'FTR6GV', 'principal_dx_code_set_2': 'FTR6QD'}
                     ],
                     'mdc': [4, 5]
-                    # No need for a separate 'poa_dx_exclusion' key here, as it's handled directly in the _check_psi04_stratum_criteria logic.
                 }
             },
             'STRATUM_SEPSIS': {
                 'inclusion': {
-                    'secondary_dx': ['FTR4DX'] # Changed from secondary_dx_not_poa
+                    'secondary_dx': ['FTR4DX']
                 },
                 'exclusions': {
-                    # FTR4DX is for sepsis diagnosis codes (used for both inclusion and principal exclusion)
-                    # INFECID is for infection diagnosis codes (also used for principal exclusion)
                     'principal_dx': ['FTR4DX', 'INFECID']
                 }
             },
             'STRATUM_PNEUMONIA': {
                 'inclusion': {
-                    'secondary_dx': ['FTR3DX'] # Changed from secondary_dx_not_poa
+                    'secondary_dx': ['FTR3DX']
                 },
                 'exclusions': {
                     'principal_dx': ['FTR3DX', 'FTR3EXA'],
@@ -155,7 +150,7 @@ class PSICalculator:
             },
             'STRATUM_GI_HEMORRHAGE': {
                 'inclusion': {
-                    'secondary_dx': ['FTR6DX'] # Changed from secondary_dx_not_poa
+                    'secondary_dx': ['FTR6DX']
                 },
                 'exclusions': {
                     'principal_dx': ['FTR6DX', 'TRAUMID', 'ALCHLSM', 'FTR6EX'],
@@ -167,7 +162,7 @@ class PSICalculator:
             },
             'STRATUM_DVT_PE': {
                 'inclusion': {
-                    'secondary_dx': ['FTR2DXB'] # Changed from secondary_dx_not_poa
+                    'secondary_dx': ['FTR2DXB']
                 },
                 'exclusions': {
                     'principal_dx': ['FTR2DXB', 'OBEMBOL']
@@ -897,62 +892,64 @@ class PSICalculator:
         mdc = row.get('MDC')
         mdc_int = int(mdc) if pd.notna(mdc) else None
 
-        # --- Specific POA logic for STRATUM_SHOCK FTR5DX ---
+        # --- Specific POA and Procedure logic for STRATUM_SHOCK FTR5DX / FTR5PR ---
+        # This section implements the "either/or" inclusion logic for STRATUM_SHOCK
         if stratum_name == 'STRATUM_SHOCK':
-            found_ftr5dx_poa_y = False
-            found_ftr5dx_non_poa = False
+            meets_shock_specific_inclusion = False
             ftr5dx_codes = appendix.get('FTR5DX', set())
+            ftr5pr_codes = appendix.get('FTR5PR', set())
 
+            # Check for FTR5DX diagnosis with non-POA status
             for dx_entry in all_diagnoses: # Check all diagnoses (principal and secondary)
                 dx_code = dx_entry['code']
                 poa_status = dx_entry['poa']
                 if dx_code in ftr5dx_codes:
-                    if poa_status == 'Y':
-                        found_ftr5dx_poa_y = True
-                        # If any FTR5DX is POA='Y', this stratum is excluded for this patient.
-                        # This takes precedence over any inclusion for STRATUM_SHOCK.
-                        return False
-                    elif poa_status in ['N', 'U', 'W', None] or pd.isna(poa_status):
-                        found_ftr5dx_non_poa = True
+                    if poa_status in ['N', 'U', 'W', None] or pd.isna(poa_status):
+                        meets_shock_specific_inclusion = True
+                        break # Found a qualifying non-POA FTR5DX, so this part of inclusion is met
 
-            # If we reached here, it means no FTR5DX was POA='Y'.
-            # Now, if a non-POA FTR5DX was found, it contributes to inclusion.
-            if found_ftr5dx_non_poa:
-                # If non-POA FTR5DX is found, this satisfies one part of the inclusion for STRATUM_SHOCK.
-                # We don't return True immediately because there might be other exclusions.
-                pass
-            # If no FTR5DX (neither POA Y nor non-POA) was found, then for STRATUM_SHOCK,
-            # inclusion can still be met by FTR5PR procedure. So, we don't return False here.
+            # If not already met by FTR5DX, check for FTR5PR procedure timing
+            if not meets_shock_specific_inclusion:
+                # The rule states FTR5PR occurs on the same day as or after the first ORPROC
+                if self._check_procedure_timing(all_procedures, first_or_proc_date, 'FTR5PR', min_days=0, inclusive_min=True):
+                    meets_shock_specific_inclusion = True
 
-        # --- Check Stratum Inclusion Criteria ---
-        meets_inclusion = False
+            # If neither of the specific shock inclusion criteria are met, then this stratum is not applicable
+            if not meets_shock_specific_inclusion:
+                return False
+
+        # --- Check Stratum Inclusion Criteria (for other strata, or if STRATUM_SHOCK specific inclusion was met) ---
+        # This block is for general secondary_dx inclusions defined in psi04_rules
+        meets_general_inclusion = False
         inclusion_rules = stratum_rules.get('inclusion', {})
 
-        # Secondary DX (for other strata, or if FTR5DX non-POA wasn't the inclusion for STRATUM_SHOCK)
-        # For STRATUM_SHOCK, if found_ftr5dx_non_poa is True, it means the DX inclusion is met.
-        if stratum_name == 'STRATUM_SHOCK':
-            if found_ftr5dx_non_poa:
-                meets_inclusion = True
-        else: # For other strata
+        # This part applies to all strata *except* STRATUM_SHOCK's FTR5DX, which is handled above.
+        # For STRATUM_SHOCK, we already determined meets_shock_specific_inclusion.
+        if stratum_name != 'STRATUM_SHOCK':
             for code_set_name in inclusion_rules.get('secondary_dx', []):
                 if any(dx_entry['code'] in appendix.get(code_set_name, set())
                        for dx_entry in all_diagnoses[1:]): # Secondary diagnoses only
-                    meets_inclusion = True
+                    meets_general_inclusion = True
                     break
 
-        # Procedure after OR (if not already included by DX or for other strata)
-        if not meets_inclusion and 'procedure_after_or' in inclusion_rules:
-            proc_rule = inclusion_rules['procedure_after_or']
-            if self._check_procedure_timing(all_procedures, first_or_proc_date,
-                                            proc_rule['code_set'],
-                                            min_days=proc_rule['min_days_after_or'],
-                                            inclusive_min=proc_rule['inclusive_min']):
-                meets_inclusion = True
+            # Procedure after OR (for other strata, or if STRATUM_SHOCK's FTR5PR wasn't already checked)
+            # For STRATUM_SHOCK, FTR5PR is part of its specific inclusion, so this general check is skipped.
+            if not meets_general_inclusion and 'procedure_after_or' in inclusion_rules and stratum_name != 'STRATUM_SHOCK':
+                proc_rule = inclusion_rules['procedure_after_or']
+                if self._check_procedure_timing(all_procedures, first_or_proc_date,
+                                                proc_rule['code_set'],
+                                                min_days=proc_rule['min_days_after_or'],
+                                                inclusive_min=proc_rule['inclusive_min']):
+                    meets_general_inclusion = True
+            
+            if not meets_general_inclusion:
+                return False # Must meet at least one inclusion criterion for non-shock strata
 
-        if not meets_inclusion:
-            return False # Must meet at least one inclusion criterion (DX or Procedure)
+        # If we are here, for STRATUM_SHOCK, meets_shock_specific_inclusion was True.
+        # For other strata, meets_general_inclusion was True.
+        # Now apply the general stratum-specific exclusions.
 
-        # --- Check Stratum Exclusion Criteria (general, after specific FTR5DX POA 'Y' check) ---
+        # --- Check Stratum Exclusion Criteria (general, after specific stratum inclusions) ---
         exclusion_rules = stratum_rules.get('exclusions', {})
 
         # Principal DX exclusions
