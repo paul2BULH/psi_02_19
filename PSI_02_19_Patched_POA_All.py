@@ -119,15 +119,17 @@ class PSICalculator:
         self.psi04_rules = {
             'STRATUM_SHOCK': {
                 'inclusion': {
-                    'secondary_dx': ['FTR5DX'], # Changed from secondary_dx_not_poa
+                    # FTR5DX secondary_dx inclusion is now handled with POA logic directly in _check_psi04_stratum_criteria
+                    # Only FTR5PR remains here for direct inclusion rule
                     'procedure_after_or': {'code_set': 'FTR5PR', 'min_days_after_or': 0, 'inclusive_min': True}
                 },
                 'exclusions': {
-                    'principal_dx': ['FTR5DX', 'TRAUMID', 'HEMORID', 'GASTRID', 'FTR5EX'],
+                    'principal_dx': ['FTR5DX', 'TRAUMID', 'HEMORID', 'GASTRID', 'FTR5EX'], # FTR5DX as principal exclusion
                     'secondary_dx_combined': [
                         {'dx_code_set_1': 'FTR6GV', 'principal_dx_code_set_2': 'FTR6QD'}
                     ],
                     'mdc': [4, 5]
+                    # No need for a separate 'poa_dx_exclusion' key here, as it's handled directly in the _check_psi04_stratum_criteria logic.
                 }
             },
             'STRATUM_SEPSIS': {
@@ -895,19 +897,50 @@ class PSICalculator:
         mdc = row.get('MDC')
         mdc_int = int(mdc) if pd.notna(mdc) else None
 
+        # --- Specific POA logic for STRATUM_SHOCK FTR5DX ---
+        if stratum_name == 'STRATUM_SHOCK':
+            found_ftr5dx_poa_y = False
+            found_ftr5dx_non_poa = False
+            ftr5dx_codes = appendix.get('FTR5DX', set())
+
+            for dx_entry in all_diagnoses: # Check all diagnoses (principal and secondary)
+                dx_code = dx_entry['code']
+                poa_status = dx_entry['poa']
+                if dx_code in ftr5dx_codes:
+                    if poa_status == 'Y':
+                        found_ftr5dx_poa_y = True
+                        # If any FTR5DX is POA='Y', this stratum is excluded for this patient.
+                        # This takes precedence over any inclusion for STRATUM_SHOCK.
+                        return False
+                    elif poa_status in ['N', 'U', 'W', None] or pd.isna(poa_status):
+                        found_ftr5dx_non_poa = True
+
+            # If we reached here, it means no FTR5DX was POA='Y'.
+            # Now, if a non-POA FTR5DX was found, it contributes to inclusion.
+            if found_ftr5dx_non_poa:
+                # If non-POA FTR5DX is found, this satisfies one part of the inclusion for STRATUM_SHOCK.
+                # We don't return True immediately because there might be other exclusions.
+                pass
+            # If no FTR5DX (neither POA Y nor non-POA) was found, then for STRATUM_SHOCK,
+            # inclusion can still be met by FTR5PR procedure. So, we don't return False here.
+
         # --- Check Stratum Inclusion Criteria ---
         meets_inclusion = False
         inclusion_rules = stratum_rules.get('inclusion', {})
 
-        # Secondary DX (any POA status for PSI_04 strata inclusions)
-        # This is the key change based on PSI_04_Desc.txt not specifying "not POA"
-        for code_set_name in inclusion_rules.get('secondary_dx', []): # Changed from 'secondary_dx_not_poa'
-            if any(dx_entry['code'] in appendix.get(code_set_name, set())
-                   for dx_entry in all_diagnoses[1:]): # Secondary diagnoses only
+        # Secondary DX (for other strata, or if FTR5DX non-POA wasn't the inclusion for STRATUM_SHOCK)
+        # For STRATUM_SHOCK, if found_ftr5dx_non_poa is True, it means the DX inclusion is met.
+        if stratum_name == 'STRATUM_SHOCK':
+            if found_ftr5dx_non_poa:
                 meets_inclusion = True
-                break
+        else: # For other strata
+            for code_set_name in inclusion_rules.get('secondary_dx', []):
+                if any(dx_entry['code'] in appendix.get(code_set_name, set())
+                       for dx_entry in all_diagnoses[1:]): # Secondary diagnoses only
+                    meets_inclusion = True
+                    break
 
-        # Procedure after OR (if not already included)
+        # Procedure after OR (if not already included by DX or for other strata)
         if not meets_inclusion and 'procedure_after_or' in inclusion_rules:
             proc_rule = inclusion_rules['procedure_after_or']
             if self._check_procedure_timing(all_procedures, first_or_proc_date,
@@ -917,17 +950,15 @@ class PSICalculator:
                 meets_inclusion = True
 
         if not meets_inclusion:
-            return False # Must meet at least one inclusion criterion
+            return False # Must meet at least one inclusion criterion (DX or Procedure)
 
-        # --- Check Stratum Exclusion Criteria ---
+        # --- Check Stratum Exclusion Criteria (general, after specific FTR5DX POA 'Y' check) ---
         exclusion_rules = stratum_rules.get('exclusions', {})
 
         # Principal DX exclusions
         for code_set_name in exclusion_rules.get('principal_dx', []):
-            # Debug print to trace principal diagnosis exclusion
             target_codes = appendix.get(code_set_name, set())
             if principal_dx_code and principal_dx_code in target_codes:
-                print(f"DEBUG: Principal DX '{principal_dx_code}' found in exclusion set '{code_set_name}' for stratum '{stratum_name}'. Excluding.")
                 return False
 
         # Secondary DX (combined) exclusions (e.g., FTR6GV + FTR6QD)
@@ -937,25 +968,21 @@ class PSICalculator:
             has_dx1 = any(dx_entry['code'] in dx_set1 for dx_entry in all_diagnoses)
             has_dx2_principal = principal_dx_code and principal_dx_code in dx_set2
             if has_dx1 and has_dx2_principal:
-                print(f"DEBUG: Combined secondary DX exclusion triggered for stratum '{stratum_name}'. Excluding.")
                 return False
 
         # Any DX exclusions (any position, any POA status)
         for code_set_name in exclusion_rules.get('any_dx', []):
             if any(dx_entry['code'] in appendix.get(code_set_name, set()) for dx_entry in all_diagnoses):
-                print(f"DEBUG: Any DX exclusion triggered by code set '{code_set_name}' for stratum '{stratum_name}'. Excluding.")
                 return False
 
         # Any Procedure exclusions
         for code_set_name in exclusion_rules.get('any_proc', []):
             if any(proc_entry['code'] in appendix.get(code_set_name, set()) for proc_entry in all_procedures):
-                print(f"DEBUG: Any Proc exclusion triggered by code set '{code_set_name}' for stratum '{stratum_name}'. Excluding.")
                 return False
 
         # MDC exclusions
         for excluded_mdc in exclusion_rules.get('mdc', []):
             if mdc_int is not None and mdc_int == excluded_mdc:
-                print(f"DEBUG: MDC exclusion triggered by MDC '{mdc_int}' for stratum '{stratum_name}'. Excluding.")
                 return False
 
         return True # Meets inclusion and no stratum-specific exclusions
