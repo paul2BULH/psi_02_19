@@ -334,7 +334,8 @@ if uploaded_file:
                 else:
                     st.success("🎉 No PSI inclusions found - All encounters passed safety checks!")
             else:
-                display_results_table(inclusions_df, debug_mode)
+                # This line was changed to use st.session_state.results_df
+                display_results_table(st.session_state.results_df, debug_mode) 
             
             if st.session_state.error_df is not None and not st.session_state.error_df.empty:
                 st.subheader("⚠️ Error Log")
